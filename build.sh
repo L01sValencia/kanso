@@ -1,2 +1,2 @@
 #!/bin/env bash
-clang -std=c23 src/main.c -o bin/main
+clang -std=c23 -Og src/main.c -o bin/main
