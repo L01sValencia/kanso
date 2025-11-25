@@ -1,4 +1,4 @@
-#include "define.h"
+#include "defines.h"
 #include "types.h"
 #include <stdlib.h>
 #include <stdio.h>
