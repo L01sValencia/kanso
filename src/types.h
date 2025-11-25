@@ -1,9 +1,14 @@
 #pragma once
 
 #include <stdint.h>
+#include <uchar.h>
 
+/* Booleans | Booleanos */
 typedef bool bool8;
 typedef int32_t bool32; // 0 is false, otherwise true | 0 es falso, otro valor es verdadero
+
+/* Characters | Caracteres */
+typedef char8_t char8;
 
 /* Unsigned integers | Enteros sin signo */
 typedef uint8_t  uint8;
@@ -23,6 +28,8 @@ typedef double float64;
 
 static_assert(sizeof(bool8) == 1, "Unexpected bool8 size, check typedef"); // Tamaño inesperado de bool8
 static_assert(sizeof(bool32) == 4, "Unexpected bool32 size, check typedef"); // Tamaño inesperado de bool32
+
+static_assert(sizeof(char8) == 1, "Unexpected char8 size, check typedef"); // Tamaño inesperado de char8
 
 static_assert(sizeof(uint8) == 1, "Unexpected uint8 size, check typdef"); // Tamaño inesperado de uint8
 static_assert(sizeof(uint16) == 2, "Unexpected uint16 size, check typedef"); // Tamaño inesperado de uint16
