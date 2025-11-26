@@ -1,14 +1,16 @@
+/* types.h: type re-definitions | re-definiciones de tipos */
+
 #pragma once
 
 #include <stdint.h>
 #include <uchar.h>
 
 /* Booleans | Booleanos */
-typedef bool bool8;
+typedef bool bool8; // true / false
 typedef int32_t bool32; // 0 is false, otherwise true | 0 es falso, otro valor es verdadero
 
 /* Characters | Caracteres */
-typedef char8_t char8;
+typedef char8_t char8; // UTF-8
 
 /* Unsigned integers | Enteros sin signo */
 typedef uint8_t  uint8;
@@ -43,3 +45,5 @@ static_assert(sizeof(int64) == 8, "Unexpected int64 size, check typedef"); // Ta
 
 static_assert(sizeof(float32) == 4, "Unexpected float32 size, check typedef"); // Tamaño inesperado de float32
 static_assert(sizeof(float64) == 8, "Unexpected float64 size, check typedef"); // Tamaño inesperado de float64
+
+/* 21/11/2025 Luis Arturo Ramos Valencia - kanso engine */
