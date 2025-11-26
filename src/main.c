@@ -1,8 +1,9 @@
+#include "log.c"
+
 #include "defines.h"
 #include "types.h"
-#include <stdlib.h>
 
-#include "log.c"
+#include <stdlib.h>
 
 int32 main(void)
 {
