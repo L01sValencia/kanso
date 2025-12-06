@@ -1,8 +1,8 @@
+#include <stdlib.h>
+
 #include "defines.h"
 #include "log.c"
 #include "types.h"
-
-#include <stdlib.h>
 
 // NOTE(vluis): needed for wayland client
 #include <wayland-client.h>
@@ -16,6 +16,12 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <time.h>
+
+#define STD_WIDTH 1280
+#define STD_HEIGHT 720
+#define BYTES_PER_PXL 4
+#define NUMBER_OF_BUFFERS 3
 
 typedef struct {
 	struct wl_registry_listener wl_registry;
@@ -23,6 +29,7 @@ typedef struct {
 	struct xdg_wm_base_listener xdg_wm_base;
 	struct xdg_surface_listener xdg_surface;
 	struct xdg_toplevel_listener xdg_toplevel;
+	struct wl_callback_listener wl_surface_frame_listener;
 } WaylandListeners;
 
 typedef struct {
@@ -35,11 +42,23 @@ typedef struct {
 } WaylandServerState;
 
 typedef struct {
+	int32 width;
+	int32 height;
+	int32 bytes_per_row; // stride
+	int32 size;
+	int32 fd;
+	struct wl_shm_pool* wl_shm_pool;
+	struct wl_buffer* wl_buffer;
+} WaylandBuffer;
+
+typedef struct {
 	struct wl_surface* wl_surface;
 	struct xdg_surface* xdg_surface;
 	struct xdg_toplevel* xdg_toplevel;
-	int32 surface_width;
-	int32 surface_height;
+	struct wl_callback* wl_surface_frame;
+	WaylandBuffer buffers[NUMBER_OF_BUFFERS];
+	int32 latest_buffer_index; // ready to be shown on screen | listo para presentarse en pantalla
+	int32 active_buffer_index;
 } WaylandClientState;
 
 typedef struct {
@@ -47,16 +66,65 @@ typedef struct {
 	WaylandClientState client;
 } WaylandState;
 
+[[nodiscard]] bool8 waylandSetUpBuffer(WaylandBuffer* buffer, int32 width, int32 height,
+		struct wl_shm* wl_shm)
+{
+	if (width == 0 || height == 0) {
+		width = STD_WIDTH;
+		height = STD_HEIGHT;
+	}
+	buffer->width = width;
+	buffer->height = height;
+	buffer->bytes_per_row = width * BYTES_PER_PXL; // stride (in bytes)
+	buffer->size = width * height * BYTES_PER_PXL; // pixel buffer size (in bytes) | tamaño (en bytes) del buffer de píxeles
+
+	int32 retries = 100;
+	if (buffer->fd >= 0) {
+		close(buffer->fd);
+	}
+
+	int32 fd;
+	char shm_name[] = "/kanso_shm_XXXX";
+	do {
+		char* name = shm_name;
+		name = "/kanso_shm_XXXX";
+		struct timespec time;
+		if (clock_gettime(CLOCK_REALTIME, &time) < 0) {
+			logFatal("Couldn't get time from clock_gettime.");
+			// TODO(vluis): errno available, print description
+			abort();
+		}
+		uint64 random = time.tv_nsec;
+		for (char* c = shm_name; *c != '\0'; ++c) {
+			if (*c == 'X') {
+				*c = 'A' + (0b0010'0000 & random) + (0b0000'1111 & random); // A-P o a-p
+				random >>= 4;
+			}
+		}
+		fd = shm_open(shm_name, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR);
+		retries--;
+	} while (retries > 0 && fd < 0);
+	if (fd < 0) {
+		logFatal("Failed to open a POSIX shared memory object for pixel buffer allocation."); // No se pudo crear un objeto de memoria compartida POSIX para alojar buffer de píxeles
+		// TODO(vluis): errno available, print description
+		return false;
+	}
+	buffer->fd = fd;
+	shm_unlink(shm_name);
+	ftruncate(buffer->fd, buffer->size);
+	if (buffer->wl_shm_pool) {
+		wl_shm_pool_destroy(buffer->wl_shm_pool);
+	}
+	buffer->wl_shm_pool = wl_shm_create_pool(wl_shm, buffer->fd, buffer->size);
+	return true;
+}
+
 #define MIN_WLCOMPOSITOR_VERSION 4 // 3 if not using HiDPI support, 1 if not needing screen rotation
 #define MAX_WLCOMPOSITOR_VERSION 6
 #define MIN_WLSHM_VERSION 2 // TODO(vluis): Research the actual minimal version
 #define MAX_WLSHM_VERSION 2
 #define MIN_XDGWMBASE_VERSION 5
 #define MAX_XDGWMBASE_VERSION 7
-
-#define STD_WIDTH 1280
-#define STD_HEIGHT 720
-#define BYTES_PER_PXL 4
 
 global_variable bool8 running; // false 
 
@@ -199,44 +267,30 @@ internal void waylandXdgWmBaseEventPing(void *data, struct xdg_wm_base *xdg_wm_b
 internal void waylandXdgSurfaceEventConfigure(void *data, struct xdg_surface *xdg_surface,
 		uint32 serial)
 {
+	persist bool8 first_call_done = false;
+
 	WaylandState* wayland_state = data;
 	WaylandServerState* server = &wayland_state->server;
 	WaylandClientState* client = &wayland_state->client;
 
 	xdg_surface_ack_configure(xdg_surface, serial);
 
-	if (client->surface_width != 0 && client->surface_height != 0) {
+	if (first_call_done) {
 		wl_surface_commit(client->wl_surface);
 		return;
 	}
 
-	/* 
-	 * [EN] The following code only gets executed on the first call to the function 
-	 * [ES] El siguiente código únicamiente se ejecutará en la primer llamada a la función
-	 */
-	client->surface_width = STD_WIDTH;
-	client->surface_height = STD_HEIGHT;
-
-	/* display buffer allocation */
-	int32 bytes_per_row = client->surface_width * BYTES_PER_PXL; // stride (in bytes)
-	int32 size = client->surface_width * client->surface_height * BYTES_PER_PXL; // pixel buffer size (in bytes) | tamaño (en bytes) del buffer de píxeles
-	char* shm_name = "/wl_kanso";
-	int32 fd = shm_open(shm_name, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-	if (fd < 0) {
-		logFatal("Failed to open a POSIX shared memory object"); // No se pudo crear un objeto de memoria compartida POSIX
-		// TODO(vluis): errno available
-	}
-	ftruncate(fd, size);
-	struct wl_shm_pool* shm_pool = wl_shm_create_pool(server->wl_shm, fd, size);
-	struct wl_buffer* wl_buffer = wl_shm_pool_create_buffer(shm_pool, 0, client->surface_width,
-			client->surface_height, bytes_per_row, WL_SHM_FORMAT_XRGB8888);
-	wl_surface_attach(client->wl_surface, wl_buffer, 0, 0);
-	xdg_surface_set_window_geometry(client->xdg_surface, 0, 0, client->surface_width,
-			client->surface_height); // TODO(vluis) check if x = 0 and y = 0 is correct
-	shm_unlink(shm_name);
-	close(fd);
-
+	// [EN] The following code only gets executed on the first call to the function 
+	// [ES] El siguiente código únicamiente se ejecutará en la primer llamada a la función
+	client->active_buffer_index = 0;
+	WaylandBuffer* buffer = &client->buffers[client->active_buffer_index];
+	xdg_surface_set_window_geometry(client->xdg_surface, 0, 0, buffer->width, buffer->height);
+	buffer->wl_buffer = wl_shm_pool_create_buffer(buffer->wl_shm_pool, 0, buffer->width,
+			buffer->height, buffer->bytes_per_row, WL_SHM_FORMAT_XRGB8888);
+	wl_surface_attach(client->wl_surface, buffer->wl_buffer, 0, 0);
 	wl_surface_commit(client->wl_surface);
+
+	first_call_done = true;
 }
 
 /*
@@ -272,63 +326,31 @@ internal void waylandXdgToplevelEventConfigure(void *data, struct xdg_toplevel *
 	WaylandServerState* server = &wayland_state->server;
 	WaylandClientState* client = &wayland_state->client;
 
-	if (client->surface_width == 0 && client->surface_height == 0) {
-		/* [EN] The server has not called waylandXdgSurfaceEventConfigure() for the first time,
-		 * therefore we need to wait until these variables are not zero.
-		 * [ES] El servidor no ha llamado a waylandXdgSurfaceEventConfigue() por primera vez, por lo
-		 * tanto debemos esperar a que estas variables sean diferentes de cero.
-		 */
-		return;
+	if (width == 0 || height == 0) {
+		width = STD_WIDTH;
+		height = STD_HEIGHT;
 	}
 
-	if (width != 0 && height != 0) {
-		client->surface_width = width;
-		client->surface_height = height;
-	}
-
-	if (client->surface_width == 0 && client->surface_height == 0) {
-		client->surface_width = STD_WIDTH;
-		client->surface_height = STD_HEIGHT;
-	}
-
-	/* display buffer allocation */
-	int32 bytes_per_row = client->surface_width * BYTES_PER_PXL; // stride (in bytes)
-	int32 size = client->surface_width * client->surface_height * BYTES_PER_PXL; // pixel buffer size (in bytes) | tamaño (en bytes) del buffer de píxeles
-
-	char* shm_name = "/wl_kanso";
-	int32 fd = shm_open(shm_name, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-	if (fd < 0) {
-		logFatal("Failed to open a POSIX shared memory object"); // No se pudo crear un objeto de memoria compartida POSIX
-		// TODO(vluis): errno available
-	}
-	ftruncate(fd, size);
-	struct wl_shm_pool* shm_pool = wl_shm_create_pool(server->wl_shm, fd, size);
-	struct wl_buffer* wl_buffer = wl_shm_pool_create_buffer(shm_pool, 0, client->surface_width,
-			client->surface_height, bytes_per_row, WL_SHM_FORMAT_XRGB8888);
-	wl_surface_attach(client->wl_surface, wl_buffer, 0, 0);
-	xdg_surface_set_window_geometry(client->xdg_surface, 0, 0, client->surface_width,
-			client->surface_height); // TODO(vluis) check if x = 0 and y = 0 is correct
-
-	/* initial render */
-	// 32-bit RGB format, [31:0] x:R:G:B 8:8:8:8 little endian
-	void* pxl_buffer = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-	for (int32 row = 0; row < client->surface_height; ++row) {
-		uint32* pxl = (uint32*)((uint8*)pxl_buffer + (row * bytes_per_row));
-		for (int32 col = 0; col < client->surface_width; ++col) {
-			uint8* b = (uint8*)pxl; // padding
-			uint8* g = (uint8*)pxl + 1;
-			uint8* r = (uint8*)pxl + 2;
-			uint8* x = (uint8*)pxl + 3;
-			*r = 0;
-			*g = row;
-			*b = col;
-			pxl++;
+	for (int32 i = 0; i < NUMBER_OF_BUFFERS; ++i) {
+		bool8 succeded = waylandSetUpBuffer(&client->buffers[i], width, height, server->wl_shm);
+		if (!succeded) {
+			logFatal("Failed to set up buffers for wayland.");
+			abort();
 		}
 	}
 
-	munmap(pxl_buffer, size);
-	shm_unlink(shm_name);
-	close(fd);
+	xdg_surface_set_window_geometry(client->xdg_surface, 0, 0, width, height);
+
+	/*
+	 * [EN] NOTE(vluis): In a real-time application (like this one) we can avoid repaint and assign
+	 * a new buffer to the wl_surface here, because we're forcing full-size repaints (frames)
+	 * continuously.
+	 * [ES] En una aplicación en tiempo real (como ésta) podemos evitar repintar y asignar un nuevo
+	 * buffer a la superficie 'wl_surface' aquí, ya que estamos forzando repintados de tamaño
+	 * completo (nuevos fotogramas) continuamente.
+	 */
+	
+	client->active_buffer_index = -1; // no buffer is active (attached to a surface) | ningún buffer está activo (anclado a una superficie)
 }
 
 /*
@@ -393,22 +415,93 @@ void waylandXdgToplevelEventWmCapabilities(void *data, struct xdg_toplevel *xdg_
 	// TODO(vluis): Consider these befor allowing operations like: fullscreen / minimize / ...?
 }
 
+/*
+ * [EN] wl_surface callback event frame: notify that the client should start drawing a new frame.
+ * [ES] Evento frame de wl_surface callback: notifica que el cliente debería empezar a dibujar un
+ * nuevo fotograma.
+ *
+ * @param current_time current time in milliseconds, with an undefined base | tiempo actual en milisegundos, sin una base definida
+ */
+void waylandSurfaceEventNewFrame(void *data, struct wl_callback *callback, uint32 current_time)
+{	
+	// TODO(vluis): use the previous and the current_time to estimate and log a framerate
+	/* initial render */
+
+	WaylandState* wayland_state = data;
+	WaylandServerState* server = &wayland_state->server;
+	WaylandClientState* client = &wayland_state->client;
+
+	int32 render_buffer_index;
+	if (client->active_buffer_index < 0) {
+		render_buffer_index = 0;
+	} else {
+		render_buffer_index = (client->active_buffer_index + 1) % NUMBER_OF_BUFFERS;
+	}
+
+	WaylandBuffer* buffer = &client->buffers[render_buffer_index];
+
+	void* pxl_buffer = mmap(nullptr, buffer->size, PROT_READ | PROT_WRITE, MAP_SHARED, buffer->fd,
+			0);
+
+	persist int32 offset = 0;
+	for (int32 row = 0; row < buffer->height; ++row) {
+		uint32* pxl = (uint32*)((uint8*)pxl_buffer + (row * buffer->bytes_per_row));
+		for (int32 col = 0; col < buffer->width; ++col) {
+			// 32-bit RGB format, [31:0] x:R:G:B 8:8:8:8 little endian
+			uint8* b = (uint8*)pxl; // padding
+			uint8* g = (uint8*)pxl + 1;
+			uint8* r = (uint8*)pxl + 2;
+			uint8* x = (uint8*)pxl + 3;
+			*r = 0;
+			*g = row + offset;
+			*b = col + offset;
+			pxl++;
+		}
+	}
+
+	offset += 8;
+
+	munmap(pxl_buffer, buffer->size);
+
+	if (buffer->wl_buffer) {
+		wl_buffer_destroy(buffer->wl_buffer);
+	}
+
+	buffer->wl_buffer = wl_shm_pool_create_buffer(buffer->wl_shm_pool, 0, buffer->width, 
+			buffer->height, buffer->bytes_per_row, WL_SHM_FORMAT_XRGB8888);
+
+	client->latest_buffer_index = render_buffer_index;
+
+	wl_surface_attach(client->wl_surface, buffer->wl_buffer, 0, 0);
+
+	wl_surface_damage(client->wl_surface, 0, 0, buffer->width, buffer->height);
+
+	wl_surface_commit(client->wl_surface);
+
+	client->active_buffer_index = client->latest_buffer_index;
+
+	client->wl_surface_frame = wl_surface_frame(client->wl_surface);
+	wl_callback_add_listener(client->wl_surface_frame, &server->listeners.wl_surface_frame_listener,
+			wayland_state);
+}
+
 int32 main(void)
 {
 	WaylandState wayland_state = { 0 };
 	/* connection to the walyand-server */
 	WaylandServerState* wayland_server = &wayland_state.server;
+	WaylandListeners* wayland_listeners = &wayland_server->listeners;
 
-	wayland_server->listeners.wl_registry.global = waylandRegistryEventGlobal;
-	wayland_server->listeners.wl_registry.global_remove = waylandRegistryEventGlobalRemove;
-	wayland_server->listeners.wl_shm.format = waylandShmEventFormat;
-	wayland_server->listeners.xdg_wm_base.ping = waylandXdgWmBaseEventPing;
-	wayland_server->listeners.xdg_surface.configure = waylandXdgSurfaceEventConfigure;
-	wayland_server->listeners.xdg_toplevel.configure = waylandXdgToplevelEventConfigure;
-	wayland_server->listeners.xdg_toplevel.close = waylandXdgToplevelEventClose;
-	wayland_server->listeners.xdg_toplevel.configure_bounds =
-			waylandXdgToplevelEventConfigureBounds;
-	wayland_server->listeners.xdg_toplevel.wm_capabilities = waylandXdgToplevelEventWmCapabilities; // TODO(vluis): test limitting xdg_wm_base version to 4 and see if this throws an error
+	wayland_listeners->wl_registry.global = waylandRegistryEventGlobal;
+	wayland_listeners->wl_registry.global_remove = waylandRegistryEventGlobalRemove;
+	wayland_listeners->wl_shm.format = waylandShmEventFormat;
+	wayland_listeners->xdg_wm_base.ping = waylandXdgWmBaseEventPing;
+	wayland_listeners->xdg_surface.configure = waylandXdgSurfaceEventConfigure;
+	wayland_listeners->xdg_toplevel.configure = waylandXdgToplevelEventConfigure;
+	wayland_listeners->xdg_toplevel.close = waylandXdgToplevelEventClose;
+	wayland_listeners->xdg_toplevel.configure_bounds = waylandXdgToplevelEventConfigureBounds;
+	wayland_listeners->xdg_toplevel.wm_capabilities = waylandXdgToplevelEventWmCapabilities; // TODO(vluis): test limitting xdg_wm_base version to 4 and see if this throws an error
+	wayland_listeners->wl_surface_frame_listener.done = waylandSurfaceEventNewFrame;
 
 	wayland_server->wl_display = wl_display_connect(nullptr);
 	wayland_server->wl_registry = wl_display_get_registry(wayland_server->wl_display);
@@ -428,6 +521,9 @@ int32 main(void)
 	xdg_toplevel_add_listener(wayland_client->xdg_toplevel, &wayland_server->listeners.xdg_toplevel,
 			&wayland_state);
 	xdg_toplevel_set_title(wayland_client->xdg_toplevel, "kanso");
+	wayland_client->wl_surface_frame = wl_surface_frame(wayland_client->wl_surface);
+	wl_callback_add_listener(wayland_client->wl_surface_frame,
+			&wayland_server->listeners.wl_surface_frame_listener, &wayland_state);
 
 	wl_surface_commit(wayland_client->wl_surface);
 
