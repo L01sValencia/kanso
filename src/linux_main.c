@@ -9,7 +9,6 @@
 
 void renderGradient(void* buffer, int32 width, int32 height, int32 bytes_per_row)
 {
-
 	persist int32 offset = 0;
 	for (int32 row = 0; row < height; ++row) {
 		uint32* pxl = (uint32*)((uint8*)buffer + (row * bytes_per_row));

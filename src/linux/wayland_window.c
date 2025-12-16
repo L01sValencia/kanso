@@ -183,16 +183,13 @@ typedef struct {
 		logFatal("The version (%u) of the wayland global object %s, is lower than the minimal "
 				"supported by kanso (%u).", server_supported_version, object_interface->name,
 				client_min_supported_version);
-		goto error;
+		wl_display_disconnect(display);
+		abort();
 	} else if (server_supported_version > client_max_supported_version) {
 		object_version = client_max_supported_version;
 	}
 	void* object = wl_registry_bind(registry, object_name, object_interface, object_version);
 	return object;
-
-	error:
-		wl_display_disconnect(display);
-		abort();
 }
 
 /*
