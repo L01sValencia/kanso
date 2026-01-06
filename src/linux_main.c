@@ -5,7 +5,8 @@
 #include "render.h"
 
 #include "log.c"
-#include "linux/wayland_window.c"
+#include "linux/wayland_window.c" // TODO(vluis): Maybe rename this file to wayland_client.c or do a
+// separation of concerns
 
 void renderGradient(void* buffer, int32 width, int32 height, int32 bytes_per_row)
 {
@@ -34,7 +35,7 @@ int32 main(void)
 	WaylandClientState* wayland_client = &wayland_state.client;
 
 	waylandSetListeners(&wayland_server->listeners);
-	waylandServerConnect(wayland_server);
+	waylandServerConnect(&wayland_state);
 	waylandClientInitialize(&wayland_state);
 
 	wayland_client->running = true;

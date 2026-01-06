@@ -20,6 +20,8 @@
 #define MAX_WLCOMPOSITOR_VERSION 6
 #define MIN_WLSHM_VERSION 2 // TODO(vluis): Research the actual minimal version
 #define MAX_WLSHM_VERSION 2
+#define MIN_SEAT_VERSION 7 // TODO(vluis): Research the actual minimal version
+#define MAX_SEAT_VERSION 10
 #define MIN_XDGWMBASE_VERSION 5
 #define MAX_XDGWMBASE_VERSION 7
 
@@ -35,14 +37,16 @@ typedef struct {
 	struct xdg_surface_listener xdg_surface;
 	struct xdg_toplevel_listener xdg_toplevel;
 	struct wl_callback_listener wl_surface_frame_listener;
+	struct wl_seat_listener wl_seat;
 } WaylandListeners;
 
 typedef struct {
 	struct wl_display* wl_display;
 	struct wl_registry* wl_registry;
 	struct wl_compositor* wl_compositor;
-	struct wl_shm* wl_shm;
+	struct wl_seat* wl_seat;
 	struct xdg_wm_base* xdg_wm_base;
+	struct wl_shm* wl_shm;
 	WaylandListeners listeners;
 } WaylandServerState;
 
@@ -61,6 +65,8 @@ typedef struct {
 	struct xdg_surface* xdg_surface;
 	struct xdg_toplevel* xdg_toplevel;
 	struct wl_callback* wl_surface_frame;
+	struct wl_keyboard* wl_keyboard;
+	struct wl_pointer* wl_pointer;
 	WaylandBuffer buffers[NUMBER_OF_BUFFERS];
 	int32 last_rendered_buffer_index; // ready to be shown on screen | listo para presentarse en pantalla
 	int32 active_buffer_index;
@@ -196,10 +202,12 @@ typedef struct {
  * [EN] The wl_registry global object notifies the availability of global objects.
  * [ES] El objeto global wl_registry notifica la disponibilidad de objetos globales.
  */
-internal void waylandRegistryEventGlobal(void *data, struct wl_registry *registry,
+internal void waylandRegistryEventGlobal(void* data, struct wl_registry* registry,
 		uint32 object_name, const char *interface_name, uint32 interface_version)
 {
-	WaylandServerState* server = data;
+	WaylandState* wayland_state = data;
+	WaylandServerState* server = &wayland_state->server;
+	WaylandClientState* client = &wayland_state->client;
 
 	// TODO(vluis): explore if (!0) is faster than (0 == 0) in the context of if statements
 	if (!strcmp(wl_compositor_interface.name, interface_name)) {
@@ -213,6 +221,13 @@ internal void waylandRegistryEventGlobal(void *data, struct wl_registry *registr
 				&wl_shm_interface, object_name, interface_version, MIN_WLSHM_VERSION,
 				MAX_WLSHM_VERSION);
 		wl_shm_add_listener(server->wl_shm, &server->listeners.wl_shm, nullptr);
+		logInfo("Successful bind to the wayland global object %s", interface_name);
+	}
+	else if (!strcmp(wl_seat_interface.name, interface_name)) {
+		server->wl_seat = waylandBindToGlobalObject(server->wl_display, server->wl_registry,
+				&wl_seat_interface, object_name, interface_version, MIN_SEAT_VERSION,
+				MAX_SEAT_VERSION);
+		wl_seat_add_listener(server->wl_seat, &server->listeners.wl_seat, client);
 		logInfo("Successful bind to the wayland global object %s", interface_name);
 	}
 	else if (!strcmp(xdg_wm_base_interface.name, interface_name)) {
@@ -229,7 +244,7 @@ internal void waylandRegistryEventGlobal(void *data, struct wl_registry *registr
  * [ES] El objeto global wl_registry notifica la eliminación de objetos globales previamente
  * disponibles.
  */
-internal void waylandRegistryEventGlobalRemove(void *data, struct wl_registry *registry,
+internal void waylandRegistryEventGlobalRemove(void* data, struct wl_registry* registry,
 		uint32 object_name)
 {
 	/* Intentionally left blank | Intencionalmente en blanco */
@@ -241,7 +256,7 @@ internal void waylandRegistryEventGlobalRemove(void *data, struct wl_registry *r
  * [ES] El objeto global wl_shm informa sobre un formato válido de píxeles que puede ser utilizado
  * por 'buffers' de píxeles.
  */
-internal void waylandShmEventFormat(void *data, struct wl_shm* shm, uint32 pxl_format)
+internal void waylandShmEventFormat(void* data, struct wl_shm* shm, uint32 pxl_format)
 {
 	/* 
 	 * [EN] Intentionally left blank since we're using one of the two 'always supported' formats:
@@ -255,7 +270,7 @@ internal void waylandShmEventFormat(void *data, struct wl_shm* shm, uint32 pxl_f
  * [EN] The xdg_wm_base global object asks the application if it is still responsive (running ok).
  * [ES] El objeto global xdg_wm_base pregunta a la aplicación si ésta sigue responsiva (corriendo).
  */
-internal void waylandXdgWmBaseEventPing(void *data, struct xdg_wm_base *xdg_wm_base, uint32 serial)
+internal void waylandXdgWmBaseEventPing(void *data, struct xdg_wm_base* xdg_wm_base, uint32 serial)
 {
 	xdg_wm_base_pong(xdg_wm_base, serial);
 }
@@ -264,7 +279,7 @@ internal void waylandXdgWmBaseEventPing(void *data, struct xdg_wm_base *xdg_wm_b
  * [EN] The xdg_surface global object issues the final configuration event for a surface.
  * [ES] El objeto global xdg_surface expide el evento final de configuración para una superficie.
  */
-internal void waylandXdgSurfaceEventConfigure(void *data, struct xdg_surface *xdg_surface,
+internal void waylandXdgSurfaceEventConfigure(void* data, struct xdg_surface* xdg_surface,
 		uint32 serial)
 {
 	persist bool8 first_call_done = false;
@@ -295,8 +310,8 @@ internal void waylandXdgSurfaceEventConfigure(void *data, struct xdg_surface *xd
  * [ES] El objeto global xdg_toplevel expide un evento de configuración para una superficie,
  * sugiriendo un cambio en tamaño de la superficie.
  */
-internal void waylandXdgToplevelEventConfigure(void *data, struct xdg_toplevel *xdg_toplevel,
-		int32 suggested_new_width, int32 suggested_new_height, struct wl_array *surface_states)
+internal void waylandXdgToplevelEventConfigure(void* data, struct xdg_toplevel* xdg_toplevel,
+		int32 suggested_new_width, int32 suggested_new_height, struct wl_array* surface_states)
 {
 	/* NOTE(vluis): maybe consider the surface_states?
 	 *    1 maximized - since v2
@@ -342,7 +357,7 @@ internal void waylandXdgToplevelEventConfigure(void *data, struct xdg_toplevel *
  * [ES] El objeto global xdg_toplevel informa que el usuario está pidiendo que la superficie sea
  * cerrada.
  */
-internal void waylandXdgToplevelEventClose(void *data, struct xdg_toplevel *xdg_toplevel)
+internal void waylandXdgToplevelEventClose(void* data, struct xdg_toplevel* xdg_toplevel)
 {
 	// TODO(vluis): Send dialog to user to confirm exit, before actually closing the surface
 	WaylandState* wayland_state = data;
@@ -355,7 +370,7 @@ internal void waylandXdgToplevelEventClose(void *data, struct xdg_toplevel *xdg_
  * [ES] El objeto global xdg_toplevel comunica el tamaño al cual es recomendado limitar una
  * superficie.
  */
-internal void waylandXdgToplevelEventConfigureBounds(void *data, struct xdg_toplevel *xdg_toplevel,
+internal void waylandXdgToplevelEventConfigureBounds(void* data, struct xdg_toplevel* xdg_toplevel,
 		int32 suggested_max_width, int32 suggested_max_height)
 {
 	// Intentionally left blank, for now
@@ -373,8 +388,8 @@ internal void waylandXdgToplevelEventConfigureBounds(void *data, struct xdg_topl
  * [ES] El objeto global xdg_toplevel anuncia las capacidades soportadas por el compositor
  * referentes a la presentación de superficies.
  */
-void waylandXdgToplevelEventWmCapabilities(void *data, struct xdg_toplevel *xdg_toplevel,
-		struct wl_array *compositor_capabilities)
+void waylandXdgToplevelEventWmCapabilities(void* data, struct xdg_toplevel* xdg_toplevel,
+		struct wl_array* compositor_capabilities)
 {
 	// Intentionally left blank, for now
 	// TODO(vluis): Consider these befor allowing operations like: fullscreen / minimize / ...?
@@ -392,7 +407,7 @@ void waylandXdgToplevelEventWmCapabilities(void *data, struct xdg_toplevel *xdg_
  * [ES] El objeto global wl_callback de wl_surface notifica que el cliente debería empezar a dibujar
  * un nuevo fotograma.
  */
-void waylandSurfaceEventNewFrame(void *data, struct wl_callback *callback, uint32 current_time)
+void waylandSurfaceEventNewFrame(void* data, struct wl_callback* callback, uint32 current_time)
 {	
 	// TODO(vluis): use the previous and the current_time to estimate and log a framerate
 	/* initial render */
@@ -415,6 +430,36 @@ void waylandSurfaceEventNewFrame(void *data, struct wl_callback *callback, uint3
 }
 
 /*
+ * [EN] The wl_seat global object announces changes in input capabilities.
+ * [ES] El objeto global wl_seat anuncia cambios en capacidades de entrada.
+ */
+void waylandSeatEventCapabilities(void* data, struct wl_seat* seat, uint32 capabilities)
+{
+	WaylandClientState* client = data;
+	if (capabilities & WL_SEAT_CAPABILITY_KEYBOARD) {
+		assert(!client->wl_keyboard, "Didn't released wl_keyboard when the capability was lost.");
+		client->wl_keyboard = wl_seat_get_keyboard(seat);
+	} else if (client->wl_keyboard) {
+		wl_keyboard_destroy(client->wl_keyboard);
+		client->wl_keyboard = nullptr;
+	}
+
+	if (capabilities & WL_SEAT_CAPABILITY_POINTER) {
+		assert(!client->wl_pointer, "Didn't released wl_pointer when the capability was lost.");
+		client->wl_pointer = wl_seat_get_pointer(seat);
+	} else if (client->wl_pointer) {
+		wl_pointer_destroy(client->wl_pointer);
+		client->wl_pointer = nullptr;
+	}
+}
+
+void waylandSeatEventName(void* data, struct wl_seat* seat, const char* name)
+{
+	// Intentionally left blank
+	// TODO(vluis): Is this needed for my simple client?
+}
+
+/*
  * [EN] Sets wayland events callback functions.
  * [ES] Configura las funciones callback de los eventos wayland.
  */
@@ -430,6 +475,8 @@ internal void waylandSetListeners(WaylandListeners* listeners)
 	listeners->xdg_toplevel.configure_bounds = waylandXdgToplevelEventConfigureBounds;
 	listeners->xdg_toplevel.wm_capabilities = waylandXdgToplevelEventWmCapabilities; // TODO(vluis): test limiting xdg_wm_base version to 4 and see if this throws an error
 	listeners->wl_surface_frame_listener.done = waylandSurfaceEventNewFrame;
+	listeners->wl_seat.capabilities = waylandSeatEventCapabilities;
+	listeners->wl_seat.name = waylandSeatEventName;
 }
 
 /*
@@ -438,12 +485,12 @@ internal void waylandSetListeners(WaylandListeners* listeners)
  * [ES] Establece una conexión al servidor wayland y comienza el proceso de obtener los objetos
  * globales necesarios.
  */
-internal void waylandServerConnect(WaylandServerState* server)
+internal void waylandServerConnect(WaylandState* wayland_state)
 {
+	WaylandServerState* server = &wayland_state->server;
 	server->wl_display = wl_display_connect(nullptr);
 	server->wl_registry = wl_display_get_registry(server->wl_display);
-	wl_registry_add_listener(server->wl_registry, &server->listeners.wl_registry,
-			server);
+	wl_registry_add_listener(server->wl_registry, &server->listeners.wl_registry, wayland_state);
 	wl_display_roundtrip(server->wl_display); // wait for wl_registry events to process
 }
 
