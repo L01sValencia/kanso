@@ -1,14 +1,17 @@
 #include <stdlib.h>
 
+#define KSO_LOG_IMPLEMENTATION
+
+#include "log.h"
 #include "defines.h"
 #include "types.h"
 #include "render.h"
 
-#include "log.c"
 #include "linux/wayland_window.c" // TODO(vluis): Maybe rename this file to wayland_client.c or do a
 // separation of concerns
 
-void renderGradient(void* buffer, int32 width, int32 height, int32 bytes_per_row)
+void renderGradient(void* buffer, int32 width, int32 height, int32 bytes_per_row,
+		uint32 animation_speed)
 {
 	persist int32 offset = 0;
 	for (int32 row = 0; row < height; ++row) {
@@ -25,7 +28,7 @@ void renderGradient(void* buffer, int32 width, int32 height, int32 bytes_per_row
 			pxl++;
 		}
 	}
-	offset += 8;
+	offset += animation_speed;
 }
 
 int32 main(void)

@@ -1,6 +1,7 @@
 /* log.h: logging functions declarations */
 
 #pragma once
+
 /* LogType descriptions | descripciones de LogType
  * LOG_TRACE: Verbose or highly frequent debugging messages | Mensajes con fines de debugging verbosos o muy frecuentes
  * LOG_DEBUG: Debugging messages | Mensajes de debugging
@@ -33,4 +34,29 @@ void logMessage(LogType message_type, const char* message, ...);
 #define logError(message, ...) logMessage(LOG_ERROR, message __VA_OPT__(,) __VA_ARGS__)
 #define logFatal(message, ...) logMessage(LOG_FATAL, message __VA_OPT__(,) __VA_ARGS__)
 
-/* 09/12/2025 Luis Arturo Ramos Valencia - kanso engine */
+#if defined(KSO_LOG_IMPLEMENTATION)
+
+#include <stdarg.h>
+#include <stdio.h>
+
+char* logtype_tags[] = { "TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL" }; // etiquetas
+
+void logMessage(LogType message_type, const char* message, ...)
+{
+	FILE* output; // salida destino del mensaje
+	if (message_type <= LOG_INFO) { // mensajes informativos
+		output = stdout; // a salida estándar
+	} else { // mensajes de gravedad
+		output = stderr; // a salida de error estándar
+	}
+	fprintf(output, "%s: ", logtype_tags[message_type]); // print tag | imprimir etiqueta
+	va_list arguments;
+	va_start(arguments, message);
+	vfprintf(output, message, arguments);
+	va_end(arguments);
+	fprintf(output, "%c", '\n');
+}
+
+#endif // KSO_LOG_IMPLEMENTATION
+
+/* 25/11/2025 Luis Arturo Ramos Valencia - kanso engine */
